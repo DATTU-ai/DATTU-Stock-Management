@@ -12,8 +12,9 @@ import React, {
   useCallback
 } from "react";
 
-// ✅ BACKEND BASE URL (from Render env variable)
-const API_URL = import.meta.env.VITE_API_URL;
+// Backend base URL.
+// Fall back to relative paths so local Vite proxy works when VITE_API_URL is unset.
+const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
 // Auth Context
 const AuthContext = createContext(null);

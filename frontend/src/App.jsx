@@ -125,8 +125,8 @@ function BillProcessingDashboard() {
     const [processingState, setProcessingState] = useState(ProcessingState.IDLE);
     const [errorMessage, setErrorMessage] = useState('');
 
-    // Get API URL from environment
-    const API_URL = import.meta.env.VITE_API_URL;
+    // Get API URL from environment, but fall back to the current origin.
+    const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
     const handleAnalysisProcess = useCallback(async () => {
         if (purchaseFiles.length === 0 && salesFiles.length === 0) return;
