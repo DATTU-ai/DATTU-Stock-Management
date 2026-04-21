@@ -75,6 +75,7 @@ export const AuthProvider = ({ children }) => {
 
   // 🔹 Login
   const login = useCallback(async (username, password) => {
+    console.log("Sending:", { username, password });
     const response = await fetch(`${API_URL}/auth/login`, {
       method: "POST",
       headers: {
