@@ -147,6 +147,7 @@ async def analyze_bills(
     
     purchase_data = []
     sales_data = []
+    failed_bills: List[dict] = []
     
     try:
         # Process purchase files
@@ -166,7 +167,19 @@ async def analyze_bills(
                         parse_result.text_content,
                         parse_result.tables
                     )
-                    
+
+                    # Quality gate: if extraction produced no items, do not include it in aggregation.
+                    if not extracted.line_items:
+                        failed_bills.append({
+                            "kind": "PURCHASE",
+                            "filename": file.filename,
+                            "invoice_number": extracted.invoice_number,
+                            "date": extracted.date,
+                            "reason": "No line items extracted. Bill excluded from inventory aggregation."
+                                      + (" Notes: " + "; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                        })
+                        continue
+
                     purchase_data.append({
                         'invoice_number': extracted.invoice_number,
                         'date': extracted.date,
@@ -210,29 +223,21 @@ async def analyze_bills(
                         parse_result.text_content,
                         parse_result.tables
                     )
+
+                    if not extracted.line_items:
+                        failed_bills.append({
+                            "kind": "SALES",
+                            "filename": file.filename,
+                            "invoice_number": extracted.invoice_number,
+                            "date": extracted.date,
+                            "reason": "No line items extracted. Bill excluded from inventory aggregation."
+                                      + (" Notes: " + "; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                        })
+                        continue
                     
-                    # Auto-detect bill type if enabled
-                    if auto_detect:
-                        detected_type = inventory_analyzer.detect_bill_type(
-                            parse_result.text_content
-                        )
-                        # Override if detected as purchase
-                        if detected_type.value == 'purchase':
-                            purchase_data.append({
-                                'invoice_number': extracted.invoice_number,
-                                'date': extracted.date,
-                                'vendor_name': extracted.vendor_name,
-                                'customer_name': extracted.customer_name,
-                                'line_items': extracted.line_items,
-                                'additional_charges': extracted.additional_charges,
-                                'subtotal': extracted.subtotal,
-                                'cgst': extracted.cgst,
-                                'sgst': extracted.sgst,
-                                'igst': extracted.igst,
-                                'tax': extracted.tax,
-                                'total': extracted.total
-                            })
-                            continue
+                    # IMPORTANT:
+                    # The UI already separates Purchase vs Sales uploads.
+                    # Respect that split and do not re-route sales uploads into purchases.
                     sales_data.append({
                         'invoice_number': extracted.invoice_number,
                         'date': extracted.date,
@@ -264,7 +269,7 @@ async def analyze_bills(
         if not purchase_data and not sales_data:
             raise HTTPException(
                 status_code=400,
-                detail="No valid bills were found. Please upload at least one valid Purchase or Sales bill."
+                detail="No valid bills were found (all extractions had zero line items). Please check PDF quality or upload a different copy."
             )
         
         # Perform inventory analysis
@@ -274,7 +279,8 @@ async def analyze_bills(
         excel_bytes = excel_generator.generate_analysis_report(
             analysis,
             purchase_data,
-            sales_data
+            sales_data,
+            failed_bills=failed_bills
         )
         
         # Generate filename

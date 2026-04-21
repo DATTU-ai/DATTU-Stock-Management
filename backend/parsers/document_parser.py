@@ -184,18 +184,40 @@ class DocumentParser:
         try:
             import pdfplumber
             with pdfplumber.open(buffer) as pdf:
-                for page in pdf.pages:
+                for page_idx, page in enumerate(pdf.pages, start=1):
                     # Extract text
                     page_text = page.extract_text()
                     if page_text:
                         text_content.append(page_text)
 
-                    # Extract tables (Optional, kept for structure if needed later)
-                    # page_tables = page.extract_tables()
-                    # for table in page_tables:
-                    #     if table:
-                    #         df = pd.DataFrame(table[1:], columns=table[0])
-                    #         tables.append(df)
+                    # Extract tables (best-effort). This is critical for invoices where
+                    # discounts/taxes break onto separate lines in extracted text.
+                    try:
+                        page_tables = page.extract_tables(
+                            table_settings={
+                                "vertical_strategy": "lines",
+                                "horizontal_strategy": "lines",
+                                "intersection_tolerance": 5,
+                                "snap_tolerance": 3,
+                                "join_tolerance": 3,
+                                "edge_min_length": 3,
+                                "min_words_vertical": 1,
+                                "min_words_horizontal": 1,
+                            }
+                        )
+                    except Exception:
+                        page_tables = None
+
+                    if page_tables:
+                        for table in page_tables:
+                            if not table:
+                                continue
+                            # Convert raw table rows to DataFrame (keep all rows; headers may be messy)
+                            try:
+                                df = pd.DataFrame(table)
+                                tables.append({"page": page_idx, "data": df})
+                            except Exception:
+                                continue
 
             full_text = "\n".join(text_content).strip()
             print(f"DEBUG: Extracted text length: {len(full_text)}")

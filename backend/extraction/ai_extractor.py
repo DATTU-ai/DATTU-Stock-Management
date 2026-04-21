@@ -18,7 +18,7 @@ import re
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 # Load environment variables from backend/.env regardless of launch directory
 from dotenv import load_dotenv
@@ -129,6 +129,80 @@ def _split_trailing_discount_from_item_name(item_name: str, discount_percent: fl
     return s, discount_percent
 
 
+def _render_tables_for_prompt(tables: Optional[list], max_tables: int = 3, max_rows: int = 25) -> str:
+    """
+    Convert extracted PDF tables into a compact TSV-like block for LLM consumption.
+    tables may include entries like {"page": int, "data": DataFrame}.
+    """
+    if not tables:
+        return ""
+
+    blocks = []
+    used = 0
+    for t in tables:
+        if used >= max_tables:
+            break
+        df = None
+        page = None
+        if isinstance(t, dict) and "data" in t:
+            df = t.get("data")
+            page = t.get("page")
+        else:
+            df = t
+        if df is None:
+            continue
+        try:
+            # DataFrame -> list of rows; keep as strings
+            rows = df.fillna("").astype(str).values.tolist()
+        except Exception:
+            continue
+        if not rows:
+            continue
+        rows = rows[:max_rows]
+        header = f"--- TABLE (page={page}) ---" if page else "--- TABLE ---"
+        lines = ["\t".join([c.strip() for c in row]) for row in rows]
+        blocks.append("\n".join([header] + lines))
+        used += 1
+
+    return "\n\n".join(blocks).strip()
+
+
+def _estimate_line_item_rows(text_content: str) -> int:
+    """
+    Heuristic: count likely table rows that start with a serial number (e.g. '1', '2', '3')
+    near common headers. This is intentionally approximate for monitoring/extraction notes.
+    """
+    if not text_content:
+        return 0
+    lines = [ln.strip() for ln in text_content.splitlines() if ln.strip()]
+    # Focus on the area after S.NO / ITEMS headers if present
+    start_idx = 0
+    for i, ln in enumerate(lines):
+        if "s.no" in ln.lower() and ("items" in ln.lower() or "description" in ln.lower()):
+            start_idx = i
+            break
+    cand = 0
+    for ln in lines[start_idx:]:
+        if re.match(r"^\d{1,3}\s+", ln):
+            cand += 1
+    return cand
+
+
+def _safe_print(msg: str) -> None:
+    """
+    Never let stdout encoding issues break extraction.
+    Windows terminals/services can throw UnicodeEncodeError for characters like '₹'.
+    """
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        try:
+            print(msg.encode("utf-8", "replace").decode("utf-8", "replace"))
+        except Exception:
+            # As a last resort, drop the message.
+            pass
+
+
 class AIExtractor:
     """
     AI-powered data extractor for financial documents.
@@ -141,6 +215,7 @@ class AIExtractor:
     
     def __init__(self):
         """Initialize the AI extractor with Groq client."""
+        # Pin model via GROQ_MODEL env var; default is a stable general extractor.
         self.model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
         api_key = os.getenv("GROQ_API_KEY")
         
@@ -166,17 +241,22 @@ class AIExtractor:
             result.extraction_notes.append("No content provided for extraction")
             return result
         
-        print(f"\n{'='*60}")
-        print(f"[AI_EXTRACTOR] Starting AI extraction")
-        print(f"[AI_EXTRACTOR] Text length: {len(text_content)} chars")
-        print(f"[AI_EXTRACTOR] API Key loaded? {'Yes' if self.groq_client.api_key else 'NO'}") # Check if key exists
-        print(f"{'='*60}")
+        _safe_print(f"\n{'='*60}")
+        _safe_print(f"[AI_EXTRACTOR] Starting AI extraction")
+        _safe_print(f"[AI_EXTRACTOR] Text length: {len(text_content)} chars")
+        _safe_print(f"[AI_EXTRACTOR] API Key loaded? {'Yes' if self.groq_client.api_key else 'NO'}")  # Check if key exists
+        _safe_print(f"{'='*60}")
         
         # Log preview of text to stdout (Render logs)
-        print(f"[AI_EXTRACTOR] TEXT PREVIEW: {text_content[:200]}...")
+        _safe_print(f"[AI_EXTRACTOR] TEXT PREVIEW: {text_content[:200]}...")
         
         try:
+            # Prefer structured tables when available (reduces line-wrap / discount-on-next-line failures).
+            table_block = _render_tables_for_prompt(tables)
             prompt = f"""You are a Forensic Document Analyzer. Your job is to perform a DEEP SCAN of this document and extract data with 100% FATAL PRECISION.
+
+STRUCTURED TABLES (if present; highest priority for line-items):
+{table_block}
 
 DOCUMENT TEXT:
 {text_content}
@@ -236,13 +316,15 @@ Return a JSON object with this exact structure:
 5. **DISCOUNTS & ADJUSTMENTS**
    - Search deeply for "Less:", "Discount", "Round Off".
    - "Round Off" should be treated as an additional charge (can be negative).
+   - IMPORTANT: In many PDFs, discounts appear as a standalone line like `(50%)` immediately after an item row.
+     In that case, assign **discount_percent=50** to the PREVIOUS item row. Do NOT create a new line item for `(50%)`.
 
 6. **NO HALLUCINATIONS**
    - If a field is missing, return empty string "" or 0. Do NOT guess.
 
 Perform this deep analysis now. Return ONLY valid JSON."""
 
-            print(f"[AI_EXTRACTOR] Calling Groq AI...")
+            _safe_print(f"[AI_EXTRACTOR] Calling Groq AI...")
             
             response = self.groq_client.chat.completions.create(
                 model=self.model,
@@ -261,8 +343,8 @@ Perform this deep analysis now. Return ONLY valid JSON."""
             )
             
             response_text = response.choices[0].message.content.strip()
-            print(f"[AI_EXTRACTOR] Groq response received ({len(response_text)} chars)")
-            print(f"[AI_EXTRACTOR] RAW RESPONSE: {response_text}") # Log raw response to stdout
+            _safe_print(f"[AI_EXTRACTOR] Groq response received ({len(response_text)} chars)")
+            _safe_print(f"[AI_EXTRACTOR] RAW RESPONSE: {response_text}")  # Log raw response to stdout
 
 
 
@@ -294,7 +376,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                 igst=igst,
                 tax=total_tax,
                 total=float(data.get("total", 0) or 0),
-                extraction_notes=["Extracted using Groq AI"]
+                extraction_notes=[f"Extracted using Groq AI (model={self.model})"]
             )
             
             # Keywords that indicate a charge (not a product)
@@ -335,7 +417,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                     expected = qty * rate
                     # Allow small rounding difference (e.g. 1.0)
                     if abs(expected - amount) < 1.0:
-                        print(f"   [DISCOUNT CORRECTION] Removed false {discount_percent}% discount for '{item_name}' (Math proves no discount)")
+                        _safe_print(f"   [DISCOUNT CORRECTION] Removed false {discount_percent}% discount for '{item_name}' (Math proves no discount)")
                         discount_percent = 0.0
                 
                 # Post-processing: Check if this should be a charge instead of a line item
@@ -345,7 +427,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         charge_name=item_name,
                         amount=amount
                     ))
-                    print(f"   [CHARGE DETECTED] '{item_name}' moved to additional_charges")
+                    _safe_print(f"   [CHARGE DETECTED] '{item_name}' moved to additional_charges")
                 else:
                     result.line_items.append(LineItem(
                         item_name=item_name,
@@ -370,30 +452,39 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         rate=charge_rate
                     ))
             
-            print(f"[AI_EXTRACTOR] OK Extraction successful. Found {len(result.line_items)} items, {len(result.additional_charges)} charges")
+            _safe_print(f"[AI_EXTRACTOR] OK Extraction successful. Found {len(result.line_items)} items, {len(result.additional_charges)} charges")
             
             # Debug: Print extracted items with prices and discount percentage
             for i, item in enumerate(result.line_items):
-                print(f"   {i+1}. {item.item_name} | Qty: {item.quantity} | Rate: {item.rate} | Disc: {item.discount_percent}% | Amount: {item.amount}")
+                _safe_print(f"   {i+1}. {item.item_name} | Qty: {item.quantity} | Rate: {item.rate} | Disc: {item.discount_percent}% | Amount: {item.amount}")
             
             # Debug: Print charges
             if result.additional_charges:
-                print(f"   Additional Charges:")
+                _safe_print(f"   Additional Charges:")
                 for charge in result.additional_charges:
-                    print(f"      - {charge.charge_name}: {charge.amount}")
+                    _safe_print(f"      - {charge.charge_name}: {charge.amount}")
             
             if result.total > 0:
-                print(f"   Document Total: {result.total}")
+                _safe_print(f"   Document Total: {result.total}")
+
+            # Monitoring note: compare extracted items vs rough expected row count (non-fatal).
+            expected_rows = _estimate_line_item_rows(text_content)
+            if expected_rows > 0 and len(result.line_items) < max(1, expected_rows // 3):
+                result.extraction_notes.append(
+                    f"LOW_CONFIDENCE: Extracted {len(result.line_items)} items but document looks like ~{expected_rows} rows. Check table parsing / layout."
+                )
+            if table_block:
+                result.extraction_notes.append("Used structured PDF tables to guide extraction.")
             
             return result
             
         except json.JSONDecodeError as e:
-            print(f"[AI_EXTRACTOR] Failed to parse AI response as JSON: {e}")
+            _safe_print(f"[AI_EXTRACTOR] Failed to parse AI response as JSON: {e}")
             result = ExtractedData()
             result.extraction_notes.append(f"JSON parsing error: {e}")
             return result
         except Exception as e:
-            print(f"[AI_EXTRACTOR] AI extraction failed: {e}")
+            _safe_print(f"[AI_EXTRACTOR] AI extraction failed: {e}")
             result = ExtractedData()
             result.extraction_notes.append(f"Extraction error: {e}")
             return result

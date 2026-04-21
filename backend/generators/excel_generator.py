@@ -321,7 +321,8 @@ class ExcelGenerator:
         self,
         analysis,  # InventoryAnalysis object
         purchase_bills: List[dict],
-        sales_bills: List[dict]
+        sales_bills: List[dict],
+        failed_bills: Optional[List[dict]] = None
     ) -> bytes:
         """
         Generate comprehensive analysis Excel from purchase and sales data.
@@ -347,6 +348,8 @@ class ExcelGenerator:
         self._create_bills_sheet(wb, purchase_bills, "Purchase Bills", "PURCHASE")
         self._create_bills_sheet(wb, sales_bills, "Sales Bills", "SALES")
         self._create_insights_sheet(wb, analysis)
+        if failed_bills:
+            self._create_failed_bills_sheet(wb, failed_bills)
         
         # Remove default empty sheet
         if 'Sheet' in wb.sheetnames and len(wb.sheetnames) > 1:
@@ -361,6 +364,37 @@ class ExcelGenerator:
         finally:
             buffer.close()
             wb.close()
+
+    def _create_failed_bills_sheet(self, wb: Workbook, failed_bills: List[dict]):
+        """
+        Create a sheet listing bills that failed or produced low-confidence extraction.
+        This prevents silent corruption of the inventory aggregation.
+        """
+        ws = wb.create_sheet("Failed Bills")
+        ws.column_dimensions["A"].width = 14  # Type
+        ws.column_dimensions["B"].width = 45  # Filename
+        ws.column_dimensions["C"].width = 18  # Invoice
+        ws.column_dimensions["D"].width = 14  # Date
+        ws.column_dimensions["E"].width = 70  # Reason / Notes
+
+        headers = ["Bill Type", "Filename", "Invoice #", "Date", "Reason / Notes"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.fill = self.HEADER_FILL
+            cell.font = self.HEADER_FONT
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = self.BORDER
+
+        row_num = 2
+        for fb in failed_bills:
+            ws.cell(row=row_num, column=1, value=fb.get("kind", "")).border = self.BORDER
+            ws.cell(row=row_num, column=2, value=fb.get("filename", "")).border = self.BORDER
+            ws.cell(row=row_num, column=3, value=fb.get("invoice_number", "")).border = self.BORDER
+            ws.cell(row=row_num, column=4, value=fb.get("date", "")).border = self.BORDER
+            reason_cell = ws.cell(row=row_num, column=5, value=fb.get("reason", ""))
+            reason_cell.border = self.BORDER
+            reason_cell.alignment = Alignment(wrap_text=True)
+            row_num += 1
     
     def _create_inventory_summary_sheet(self, wb: Workbook, analysis):
         """
