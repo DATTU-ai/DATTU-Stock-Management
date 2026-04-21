@@ -5,10 +5,12 @@ Handles async MongoDB connection using Motor driver.
 """
 
 import os
+from pathlib import Path
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-load_dotenv()
+_BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_BACKEND_ENV_PATH)
 
 # MongoDB Configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")

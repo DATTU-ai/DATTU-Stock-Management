@@ -492,7 +492,12 @@ class ExcelGenerator:
         # Data rows with values
         row_num = header_row + 1
         for item in analysis.items:
-            ws.cell(row=row_num, column=1, value=item.item_name.title()).border = self.BORDER
+            stock_label = (
+                item.display_label
+                if getattr(item, "display_label", "")
+                else item.item_name.title()
+            )
+            ws.cell(row=row_num, column=1, value=stock_label).border = self.BORDER
             
             # Purchased Qty
             pq_cell = ws.cell(row=row_num, column=2, value=item.purchased_qty)
@@ -587,7 +592,10 @@ class ExcelGenerator:
         for bill in bills:
             bill_number = bill.get('invoice_number', 'Unknown')
             date = bill.get('date', '')
-            party = bill.get('vendor_name', '')
+            if bill_type == "SALES":
+                party = bill.get('customer_name', '') or ''
+            else:
+                party = bill.get('vendor_name', '') or ''
             line_items = bill.get('line_items', [])
             bill_cgst = bill.get('cgst', 0)
             bill_sgst = bill.get('sgst', 0)
@@ -1012,7 +1020,8 @@ class ExcelGenerator:
                 ws.cell(row=row_num, column=1, value=str(idx)).border = self.BORDER
                 ws.cell(row=row_num, column=1).alignment = Alignment(horizontal='center')
                 
-                name_cell = ws.cell(row=row_num, column=2, value=item.title())
+                # Keep exact label (preserve codes like ATF/TA)
+                name_cell = ws.cell(row=row_num, column=2, value=item)
                 name_cell.border = self.BORDER
                 
                 status_cell = ws.cell(row=row_num, column=3, value="Deficit")
@@ -1062,7 +1071,8 @@ class ExcelGenerator:
                 ws.cell(row=row_num, column=1, value=str(idx)).border = self.BORDER
                 ws.cell(row=row_num, column=1).alignment = Alignment(horizontal='center')
                 
-                name_cell = ws.cell(row=row_num, column=2, value=item.title())
+                # Keep exact label (preserve codes like ATF/TA)
+                name_cell = ws.cell(row=row_num, column=2, value=item)
                 name_cell.border = self.BORDER
                 
                 status_cell = ws.cell(row=row_num, column=3, value="Low Stock")
@@ -1105,7 +1115,11 @@ class ExcelGenerator:
             row_num += 1
             
             # Get item data for stock status check
-            item_data = {i.item_name.lower(): i for i in analysis.items}
+            # Map by both normalized key and display label (so labels match report rows)
+            item_data = {}
+            for i in analysis.items:
+                item_data[(i.item_name or "").lower()] = i
+                item_data[(getattr(i, "display_label", "") or "").lower()] = i
             
             for idx, item in enumerate(analysis.top_selling_items[:5], 1):
                 # Rank indicator
@@ -1115,7 +1129,8 @@ class ExcelGenerator:
                 rank_cell.alignment = Alignment(horizontal='center')
                 rank_cell.font = Font(size=12 if idx <= 3 else 10)
                 
-                name_cell = ws.cell(row=row_num, column=2, value=item.title())
+                # Keep exact label (preserve codes like ATF/TA)
+                name_cell = ws.cell(row=row_num, column=2, value=item)
                 name_cell.border = self.BORDER
                 name_cell.font = Font(bold=True if idx == 1 else False)
                 

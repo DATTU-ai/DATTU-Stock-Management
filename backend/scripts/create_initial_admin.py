@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 # Add backend directory to path so we can import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +21,8 @@ print("-" * 60)
 mongo_url = input("Enter MongoDB URL (press Enter to use from .env): ").strip()
 if not mongo_url:
     from dotenv import load_dotenv
-    load_dotenv()
+    _BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+    load_dotenv(_BACKEND_ENV_PATH)
     mongo_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 
 print(f"Using MongoDB URL: {mongo_url}")

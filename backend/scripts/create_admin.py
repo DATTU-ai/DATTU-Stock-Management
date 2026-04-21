@@ -12,6 +12,7 @@ This script will prompt for admin credentials and create the account.
 import asyncio
 import sys
 import os
+from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +24,8 @@ import bcrypt
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
-load_dotenv()
+_BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_BACKEND_ENV_PATH)
 
 # MongoDB Configuration
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")

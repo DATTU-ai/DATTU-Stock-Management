@@ -5,6 +5,7 @@ Handles password hashing and JWT token operations.
 """
 
 import os
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,7 +13,8 @@ import bcrypt
 from jose import JWTError, jwt
 from dotenv import load_dotenv
 
-load_dotenv()
+_BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_BACKEND_ENV_PATH)
 
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "fallback-secret-key")

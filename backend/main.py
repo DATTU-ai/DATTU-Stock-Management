@@ -171,6 +171,7 @@ async def analyze_bills(
                         'invoice_number': extracted.invoice_number,
                         'date': extracted.date,
                         'vendor_name': extracted.vendor_name,
+                        'customer_name': extracted.customer_name,
                         'line_items': extracted.line_items,
                         'additional_charges': extracted.additional_charges,
                         'subtotal': extracted.subtotal,
@@ -221,6 +222,7 @@ async def analyze_bills(
                                 'invoice_number': extracted.invoice_number,
                                 'date': extracted.date,
                                 'vendor_name': extracted.vendor_name,
+                                'customer_name': extracted.customer_name,
                                 'line_items': extracted.line_items,
                                 'additional_charges': extracted.additional_charges,
                                 'subtotal': extracted.subtotal,
@@ -231,11 +233,11 @@ async def analyze_bills(
                                 'total': extracted.total
                             })
                             continue
-                    
                     sales_data.append({
                         'invoice_number': extracted.invoice_number,
                         'date': extracted.date,
                         'vendor_name': extracted.vendor_name,
+                        'customer_name': extracted.customer_name,
                         'line_items': extracted.line_items,
                         'additional_charges': extracted.additional_charges,
                         'subtotal': extracted.subtotal,

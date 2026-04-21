@@ -14,13 +14,17 @@ All processing is done in-memory. No data is stored or logged.
 """
 
 import os
+import re
 import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List
 
-# Load environment variables
+# Load environment variables from backend/.env regardless of launch directory
 from dotenv import load_dotenv
-load_dotenv()
+
+_BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(_BACKEND_ENV_PATH)
 
 # Groq AI client
 from groq import Groq
@@ -71,7 +75,8 @@ class ExtractedData:
     Attributes:
         invoice_number: Invoice or bill reference number
         date: Document date
-        vendor_name: Vendor or supplier name
+        vendor_name: Seller / supplier (or company issuing a tax invoice)
+        customer_name: Buyer / bill-to / consignee (sales); usually empty on pure purchase bills
         line_items: List of line items with quantity and pricing (products only)
         additional_charges: List of charges (packing, freight, etc.) - NOT products
         subtotal: Sum of line item amounts before tax
@@ -85,6 +90,7 @@ class ExtractedData:
     invoice_number: str = ""
     date: str = ""
     vendor_name: str = ""
+    customer_name: str = ""
     line_items: List[LineItem] = field(default_factory=list)
     additional_charges: List[AdditionalCharge] = field(default_factory=list)
     subtotal: float = 0.0
@@ -94,6 +100,33 @@ class ExtractedData:
     tax: float = 0.0
     total: float = 0.0
     extraction_notes: List[str] = field(default_factory=list)
+
+
+def _split_trailing_discount_from_item_name(item_name: str, discount_percent: float) -> tuple:
+    """
+    If a discount like '50' or '50%' was merged into the product name (common PDF line-wrap issue),
+    move it to discount_percent and return a clean item_name.
+    """
+    s = (item_name or "").strip()
+    if not s:
+        return s, discount_percent
+    m = re.search(r"(\s+)(\d{1,2}(?:\.\d+)?)\s*%?\s*$", s)
+    if not m:
+        return s, discount_percent
+    try:
+        pct = float(m.group(2))
+    except ValueError:
+        return s, discount_percent
+    if not (0 < pct <= 100):
+        return s, discount_percent
+    base = s[: m.start()].strip()
+    if len(base) < 2:
+        return s, discount_percent
+    if discount_percent == 0:
+        return base, pct
+    if abs(discount_percent - pct) < 0.01:
+        return base, discount_percent
+    return s, discount_percent
 
 
 class AIExtractor:
@@ -153,6 +186,7 @@ Return a JSON object with this exact structure:
     "invoice_number": "string",
     "date": "string",
     "vendor_name": "string",
+    "customer_name": "string",
     "line_items": [
         {{
             "item_name": "string",
@@ -180,9 +214,10 @@ Return a JSON object with this exact structure:
 *** DEEP ANALYSIS PROTOCOLS (STRICT ADHERENCE REQUIRED) ***
 
 1. **VERBATIM EXTRACTION (NO SUMMARIZATION)**
-   - **Vendor Name**: Extract the FULL legal entity name (e.g., "Sai Enterprises Pvt Ltd", NOT just "Sai Enterprises"). Checks top header and bottom signature areas.
+   - **Vendor Name**: The company **issuing** the invoice (seller/supplier). Full legal name from header/footer.
+   - **Customer Name**: For sales/tax invoices, the **buyer** / **Bill To** / **Consignee (Ship to)** / **Details of Receiver** — whoever is being charged. Leave "" on purchase bills if only the supplier is shown.
    - **Invoice Number**: Capture every character, symbol, and digit. (e.g., "GST/2024-25/001" -> extract fully).
-   - **Item Names**: CAPTURE EVERYTHING. Include Model Numbers, Codes, Colours, Sizes, and Brands. (e.g., "Trophy 646 Gold large" -> extract fully).
+   - **Item Names**: Product/SKU lines from the item table ONLY. Include model numbers, codes, sizes, brands. Do NOT put buyer names, school names, delivery addresses, or city lines in `item_name` — those belong in `customer_name` only. Never duplicate a standalone discount percentage (e.g. `50` or `50%`) inside `item_name`; put it in `discount_percent` only.
 
 2. **INTELLIGENT COLUMN MAPPING**
    - The text might be jumbled. Look for patterns:
@@ -214,7 +249,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert Indian invoice extractor. Extract data from invoices including GST. IMPORTANT: Do NOT confuse GST percentages (18%, 12%, 5%) with Discount percentages. Only extract discount if explicitly labeled as 'Disc' or 'Discount'."
+                        "content": "You are an expert Indian invoice extractor. Extract GST invoices. CRITICAL: (1) vendor_name = issuing company (seller); customer_name = buyer/bill-to/consignee when present. (2) line item item_name must be products only—never buyer school names or addresses. (3) Do NOT confuse GST % with line discount %. (4) Trailing discount like 50%% must be discount_percent, not part of item_name."
                     },
                     {
                         "role": "user",
@@ -222,7 +257,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                     }
                 ],
                 temperature=0.1,
-                max_tokens=2000
+                max_tokens=4096
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -252,6 +287,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                 invoice_number=data.get("invoice_number", ""),
                 date=data.get("date", ""),
                 vendor_name=data.get("vendor_name", ""),
+                customer_name=data.get("customer_name", "") or "",
                 subtotal=float(data.get("subtotal", 0) or 0),
                 cgst=cgst,
                 sgst=sgst,
@@ -281,6 +317,9 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                 discount_percent = float(item.get("discount_percent", 0) or 0)
                 amount = float(item.get("amount", 0) or 0)
                 item_name = item.get("item_name", "Unknown")
+                item_name, discount_percent = _split_trailing_discount_from_item_name(
+                    item_name, discount_percent
+                )
                 
                 # If amount is 0 but we have qty and rate, calculate it with percentage discount
                 if amount == 0 and rate > 0:
@@ -331,7 +370,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         rate=charge_rate
                     ))
             
-            print(f"[AI_EXTRACTOR] ✓ Extraction successful! Found {len(result.line_items)} items, {len(result.additional_charges)} charges")
+            print(f"[AI_EXTRACTOR] OK Extraction successful. Found {len(result.line_items)} items, {len(result.additional_charges)} charges")
             
             # Debug: Print extracted items with prices and discount percentage
             for i, item in enumerate(result.line_items):

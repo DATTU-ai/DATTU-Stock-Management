@@ -38,7 +38,8 @@ class InventoryItem:
     Aggregated inventory data for a single item.
     
     Attributes:
-        item_name: Name of the item
+        item_name: Normalized lowercase key used for matching across bills
+        display_label: Best human-readable label (first seen raw name, preserves e.g. ATF)
         purchased_qty: Total quantity purchased
         sold_qty: Total quantity sold
         surplus_deficit: purchased_qty - sold_qty
@@ -47,6 +48,7 @@ class InventoryItem:
         sold_value: Total value of sales
     """
     item_name: str
+    display_label: str = ""
     purchased_qty: float = 0.0
     sold_qty: float = 0.0
     surplus_deficit: float = 0.0
@@ -183,7 +185,15 @@ class InventoryAnalyzer:
             for item in line_items:
                 name = self._normalize_item_name(item.item_name)
                 if name not in item_map:
-                    item_map[name] = InventoryItem(item_name=name)
+                    raw = (getattr(item, "item_name", None) or "").strip()
+                    item_map[name] = InventoryItem(
+                        item_name=name,
+                        display_label=raw or name,
+                    )
+                elif not item_map[name].display_label:
+                    raw = (getattr(item, "item_name", None) or "").strip()
+                    if raw:
+                        item_map[name].display_label = raw
                 
                 item_map[name].purchased_qty += item.quantity
                 # Add item value if available
@@ -198,7 +208,15 @@ class InventoryAnalyzer:
             for item in line_items:
                 name = self._normalize_item_name(item.item_name)
                 if name not in item_map:
-                    item_map[name] = InventoryItem(item_name=name)
+                    raw = (getattr(item, "item_name", None) or "").strip()
+                    item_map[name] = InventoryItem(
+                        item_name=name,
+                        display_label=raw or name,
+                    )
+                elif not item_map[name].display_label:
+                    raw = (getattr(item, "item_name", None) or "").strip()
+                    if raw:
+                        item_map[name].display_label = raw
                 
                 item_map[name].sold_qty += item.quantity
                 # Add item value if available
@@ -215,13 +233,13 @@ class InventoryAnalyzer:
             if item.surplus_deficit > 0:
                 if item.surplus_deficit < self.LOW_STOCK_THRESHOLD:
                     item.status = StockStatus.LOW_STOCK
-                    result.low_stock_items.append(name)
+                    result.low_stock_items.append(item.display_label or name)
                 else:
                     item.status = StockStatus.SURPLUS
-                    result.surplus_items.append(name)
+                    result.surplus_items.append(item.display_label or name)
             elif item.surplus_deficit < 0:
                 item.status = StockStatus.DEFICIT
-                result.deficit_items.append(name)
+                result.deficit_items.append(item.display_label or name)
             else:
                 item.status = StockStatus.BALANCED
         
@@ -235,7 +253,9 @@ class InventoryAnalyzer:
         # User defined criteria: "items which have saled with more than 50 quantity"
         top_sellers = [item for item in sorted_items if item.sold_qty > 50]
         
-        result.top_selling_items = [item.item_name for item in top_sellers[:10]]
+        result.top_selling_items = [
+            (item.display_label or item.item_name) for item in top_sellers[:10]
+        ]
         result.items = list(item_map.values())
         
         # Generate insights
