@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
 
 from auth.database import get_users_collection
 from auth.security import verify_password, get_password_hash, create_access_token
@@ -43,8 +43,13 @@ def is_session_active(user: dict) -> bool:
     return True  # Session is still active
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 @router.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(data: LoginRequest):
     """
     Authenticate user and return JWT token.
     
@@ -54,7 +59,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     users_collection = await get_users_collection()
     
     # Find user by username
-    user = await users_collection.find_one({"username": form_data.username})
+    user = await users_collection.find_one({"username": data.username})
     
     if not user:
         raise HTTPException(
@@ -64,7 +69,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         )
     
     # Verify password
-    if not verify_password(form_data.password, user["password_hash"]):
+    if not verify_password(data.password, user["password_hash"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
