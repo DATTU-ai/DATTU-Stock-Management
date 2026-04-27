@@ -511,7 +511,9 @@ def _fallback_extract_line_items(text: str, max_items: int = 50) -> List[LineIte
     skip_prefix = ("total", "grand total", "received amount", "previous balance", "current balance", "tax amount", "amount after tax")
     skip_exact = {"total", "grand", "grandtotal", "total:"}
 
-    for ln in lines[start:]:
+    percent_line_re = re.compile(r"^\s*(?:\(?\s*\d+(?:\.\d+)?\s*%\s*\)?\s*)+$")
+
+    for idx, ln in enumerate(lines[start:], start=start):
         low_ln = ln.lower().strip()
         if any(low_ln.startswith(p) for p in skip_prefix):
             continue
@@ -532,6 +534,16 @@ def _fallback_extract_line_items(text: str, max_items: int = 50) -> List[LineIte
                 discount_percent = 0.0
             ln = inline_disc.sub(" ", ln)
             ln = re.sub(r"\s+", " ", ln).strip()
+
+        # Some newer sales bills place discount in a tiny font on the next line.
+        # Prefer that value over any number already present in the row.
+        if idx + 1 < len(lines):
+            next_ln = lines[idx + 1].strip()
+            if percent_line_re.match(next_ln):
+                pct_vals = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", next_ln)]
+                pct_vals = [v for v in pct_vals if v > 0]
+                if pct_vals:
+                    discount_percent = pct_vals[0]
 
         # Some PDFs split amounts like "7 50.00" for "750.00" or "8 25.00" for "825.00".
         # Merge these *before* tokenization to avoid qty/rate/amount misalignment.
@@ -561,7 +573,7 @@ def _fallback_extract_line_items(text: str, max_items: int = 50) -> List[LineIte
             qty_i = unit_idx - 1 if num.match(parts[unit_idx - 1]) else numeric_idx[0]
             after = [j for j in numeric_idx if j > unit_idx]
             if len(after) >= 2:
-                rate_i, amount_i = after[0], after[1]
+                rate_i, amount_i = after[0], after[-1]
             else:
                 # fallback to first/second/third numbers
                 qty_i, rate_i, amount_i = numeric_idx[0], numeric_idx[1], numeric_idx[2]
@@ -611,6 +623,8 @@ def _fallback_extract_line_items(text: str, max_items: int = 50) -> List[LineIte
                     qty_i, rate_i = numeric_idx[-3], numeric_idx[-2]
                 else:
                     qty_i, rate_i = numeric_idx[0], numeric_idx[1]
+
+            amount_i = numeric_idx[-1]
 
         qty_tok = parts[qty_i].replace(",", "")
         rate_tok = parts[rate_i].replace(",", "")
@@ -722,6 +736,157 @@ def _fallback_extract_gst_flattened_items(text: str, max_items: int = 50) -> Lis
     return out
 
 
+def _extract_row_discounts_from_text(text: str, max_rows: int = 100) -> List[float]:
+    """
+    Extract discount percentages from small-font percent-only lines that follow a row.
+
+    Many invoices render discount in a second line like:
+      1 ITEM ... 2,808
+      (10%) (0%)
+
+    We take the first positive percentage from that follow-up line.
+    """
+    if not text:
+        return []
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    out: List[float] = []
+    percent_line_re = re.compile(r"^\s*(?:\(?\s*\d+(?:\.\d+)?\s*%\s*\)?\s*)+$")
+    skip_prefix = ("total", "grand total", "received amount", "previous balance", "current balance")
+
+    for i, ln in enumerate(lines):
+        low = ln.lower().strip()
+        if any(low.startswith(p) for p in skip_prefix):
+            continue
+        if "invoice amount in words" in low:
+            continue
+
+        is_rowish = (
+            bool(re.search(r"\b(?:pcs?|nos?|no\.?)\b", low))
+            or len(re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", ln)) >= 3
+        )
+        if not is_rowish:
+            continue
+
+        discount = 0.0
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if percent_line_re.match(nxt):
+                pct_vals = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", nxt)]
+                pct_vals = [v for v in pct_vals if 0 < v <= 100]
+                if pct_vals:
+                    discount = pct_vals[0]
+
+        out.append(discount)
+        if len(out) >= max_rows:
+            break
+
+    return out
+
+
+def _apply_text_row_adjustments(items: List[LineItem], text: str) -> None:
+    """
+    Use the original cleaned text to correct row-level discounts and net amounts.
+    """
+    discounts = _extract_row_discounts_from_text(text, max_rows=len(items))
+    if not discounts:
+        return
+
+    for item, discount in zip(items, discounts):
+        if discount <= 0:
+            continue
+
+        gross = float(item.quantity or 0) * float(item.rate or 0)
+        if gross <= 0:
+            if item.discount_percent <= 0:
+                item.discount_percent = discount
+            continue
+
+        expected_net = gross * (1 - discount / 100)
+        discount_value = gross * discount / 100
+
+        if item.discount_percent <= 0:
+            item.discount_percent = discount
+
+        # If the extracted amount is actually the discount value, replace it with net amount.
+        if item.amount > 0 and abs(item.amount - discount_value) <= max(1.0, gross * 0.02):
+            item.amount = expected_net
+        elif item.amount <= 0:
+            item.amount = expected_net
+
+
+def _fallback_extract_additional_charges(text: str, max_items: int = 20) -> List[AdditionalCharge]:
+    """
+    Best-effort extraction for non-product rows such as freight, packing and P&F.
+
+    This is intentionally conservative:
+    - only lines containing charge keywords are considered
+    - product-like rows are ignored
+    - the amount is taken from the last money-like value on the line
+    """
+    if not text:
+        return []
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    out: List[AdditionalCharge] = []
+    charge_kw = (
+        "freight",
+        "fright",
+        "courier",
+        "p&f",
+        "p & f",
+        "packing",
+        "forwarding",
+        "transport",
+        "transportation",
+        "shipping",
+        "handling",
+        "charges",
+        "charge",
+        "round off",
+        "roundoff",
+    )
+    money_re = re.compile(r"\d{1,3}(?:,\d{3})*(?:\.\d+)?")
+    qty_unit_re = re.compile(r"\b(no|nos|no\.|pcs|pc)\b", flags=re.I)
+
+    for ln in lines:
+        low = ln.lower()
+        if not any(k in low for k in charge_kw):
+            continue
+        if low.startswith(("total", "grand total", "received amount")):
+            continue
+
+        nums = money_re.findall(ln.replace(",", ""))
+        if not nums:
+            continue
+
+        # Name: trim serial numbers and trailing numeric clutter.
+        name = ln
+        name = re.sub(r"^\s*\d{1,3}\s+", "", name)
+        if qty_unit_re.search(name):
+            name = re.split(r"\b(?:no\.?|nos?|pcs|pc)\b", name, maxsplit=1, flags=re.I)[0].strip()
+        name = re.split(r"\s+[-:]\s*₹?\s*\d", name, maxsplit=1)[0].strip()
+        name = re.sub(r"\s+", " ", name).strip()
+
+        if not name:
+            continue
+
+        # Prefer the last numeric value on the row.
+        try:
+            amount = float(nums[-1].replace(",", ""))
+        except Exception:
+            continue
+        if amount <= 0:
+            continue
+
+        # If the line is of the form "P & F - 150 - ₹ 150", keep the visible charge label only.
+        out.append(AdditionalCharge(charge_name=name, amount=amount))
+        if len(out) >= max_items:
+            break
+
+    return out
+
+
 class AIExtractor:
     """
     AI-powered data extractor for financial documents.
@@ -787,6 +952,7 @@ class AIExtractor:
             # Type 4 (GST flattened): do NOT rely fully on LLM; prefer fallback first.
             if detected_format == "gst_flattened":
                 fb = _fallback_extract_gst_flattened_items(cleaned_text) or _fallback_extract_line_items(cleaned_text)
+                charges = _fallback_extract_additional_charges(cleaned_text)
                 result = ExtractedData(
                     invoice_number=header.get("invoice_number", ""),
                     date=header.get("date", ""),
@@ -801,7 +967,10 @@ class AIExtractor:
                 result.tax = result.cgst + result.sgst + result.igst
                 if fb:
                     result.line_items = fb
-                    return result
+                if charges:
+                    result.additional_charges = charges
+                _apply_text_row_adjustments(result.line_items, cleaned_text)
+                return result
 
             prompt = f"""You are a Forensic Document Analyzer. Your job is to perform a DEEP SCAN of this document and extract data with 100% FATAL PRECISION.
 
@@ -946,6 +1115,8 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                     pass
                 # Fallback extraction from cleaned text
                 result.line_items = _fallback_extract_line_items(cleaned_text)
+                result.additional_charges = _fallback_extract_additional_charges(cleaned_text)
+                _apply_text_row_adjustments(result.line_items, cleaned_text)
                 if result.line_items:
                     result.extraction_notes.append("Fallback extraction succeeded (regex-based).")
                 return result
@@ -988,7 +1159,7 @@ Perform this deep analysis now. Return ONLY valid JSON."""
             
             # Keywords that indicate a charge (not a product)
             CHARGE_KEYWORDS = [
-                'packing', 'forwarding', 'freight', 'shipping', 'handling',
+                'packing', 'forwarding', 'freight', 'fright', 'shipping', 'handling',
                 'delivery', 'transport', 'transportation', 'courier',
                 'service charge', 'service fee', 'insurance', 'loading',
                 'unloading', 'charges', 'charge', 'p&f', 'p & f',
@@ -1012,8 +1183,10 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                 )
 
                 # Fix common swapped/misread columns:
-                # If qty looks like a serial (small int) and amount/rate yields a clean integer qty, prefer that.
-                if amount > 0 and rate > 0:
+                # Only infer quantity from amount/rate when there is no discount.
+                # Discounted rows often have amount = qty * rate * (1 - discount),
+                # so using amount/rate would incorrectly halve the true quantity.
+                if amount > 0 and rate > 0 and discount_percent <= 0:
                     inferred_qty = amount / rate
                     if (
                         qty <= 20
@@ -1066,6 +1239,10 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         discount_percent=discount_percent,
                         amount=amount
                     ))
+
+            # Text-level correction pass for layouts that use a tiny follow-up discount line.
+            # This fixes cases where the model reads the discount value as the amount.
+            _apply_text_row_adjustments(result.line_items, cleaned_text)
             
             # Parse additional_charges from AI response
             for charge in data.get("additional_charges", []):
@@ -1081,7 +1258,21 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         quantity=charge_qty,
                         rate=charge_rate
                     ))
-            
+
+            # Fallback charge extraction: catches rows the model skipped, especially freight/P&F lines.
+            fallback_charges = _fallback_extract_additional_charges(cleaned_text)
+            if fallback_charges:
+                seen = {
+                    (c.charge_name.lower().strip(), round(float(c.amount or 0), 2))
+                    for c in result.additional_charges
+                }
+                for charge in fallback_charges:
+                    key = (charge.charge_name.lower().strip(), round(float(charge.amount or 0), 2))
+                    if key in seen:
+                        continue
+                    result.additional_charges.append(charge)
+                    seen.add(key)
+
             _safe_print(f"[AI_EXTRACTOR] OK Extraction successful. Found {len(result.line_items)} items, {len(result.additional_charges)} charges")
             
             # Debug: Print extracted items with prices and discount percentage
@@ -1141,9 +1332,10 @@ Perform this deep analysis now. Return ONLY valid JSON."""
                         result.line_items = fb
                         result.extraction_notes.append("Used fallback extraction due to rate limit.")
                         result.extraction_notes.append(f"detected_format={detected_format}")
+                    result.additional_charges = _fallback_extract_additional_charges(cleaned_text)
+                    _apply_text_row_adjustments(result.line_items, cleaned_text)
                 except Exception:
                     pass
             else:
                 result.error_code = "extraction_error"
             return result
-
