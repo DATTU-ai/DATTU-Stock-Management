@@ -18,12 +18,17 @@ Author: Antigravity AI Platform
 
 import io
 import gc
+import asyncio
+import json as _json
+import random
+import logging
 from typing import Optional, List
 from datetime import datetime
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 # Import processing modules
 from parsers import DocumentParser
@@ -74,6 +79,10 @@ ai_extractor = AIExtractor()
 validator = Validator()
 excel_generator = ExcelGenerator()
 inventory_analyzer = InventoryAnalyzer()
+
+# Serialize LLM calls across requests (production stability under load)
+LLM_LOCK = asyncio.Lock()
+logger = logging.getLogger("invoice_processing")
 
 
 # ============================================================================
@@ -145,9 +154,11 @@ async def analyze_bills(
     - No data stored or logged
     """
     
-    purchase_data = []
-    sales_data = []
+    purchase_data: List[dict] = []
+    sales_data: List[dict] = []
     failed_bills: List[dict] = []
+    skipped_rate_limit: List[dict] = []
+    total_bills = len(purchase_files) + len(sales_files)
     
     try:
         # Process purchase files
@@ -163,23 +174,52 @@ async def analyze_bills(
                 print(f"Processing Purchase File: {file.filename}")
                 
                 if parse_result.success:
-                    extracted = ai_extractor.extract(
-                        parse_result.text_content,
-                        parse_result.tables
-                    )
+                    # Rate limit control + sequential LLM calls across requests
+                    async with LLM_LOCK:
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
+                        extracted = await run_in_threadpool(
+                            ai_extractor.extract,
+                            parse_result.text_content,
+                            parse_result.tables,
+                        )
 
-                    # Quality gate: if extraction produced no items, do not include it in aggregation.
-                    if not extracted.line_items:
+                    err_code = getattr(extracted, "error_code", "") or ""
+                    if err_code == "rate_limit_error":
+                        # If we still extracted items via fallback, treat as processed (do not count as skipped)
+                        if extracted.line_items:
+                            failed_bills.append({
+                                "kind": "PURCHASE",
+                                "filename": file.filename,
+                                "invoice_number": extracted.invoice_number,
+                                "date": extracted.date,
+                                "reason": "rate_limit_error (used fallback extraction)"
+                            })
+                        else:
+                            skipped_rate_limit.append({
+                                "kind": "PURCHASE",
+                                "filename": file.filename,
+                                "invoice_number": extracted.invoice_number,
+                                "date": extracted.date,
+                                "reason": "skipped_due_to_rate_limit"
+                            })
+                    elif err_code:
                         failed_bills.append({
                             "kind": "PURCHASE",
                             "filename": file.filename,
                             "invoice_number": extracted.invoice_number,
                             "date": extracted.date,
-                            "reason": "No line items extracted. Bill excluded from inventory aggregation."
-                                      + (" Notes: " + "; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                            "reason": f"{err_code}: " + ("; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
                         })
-                        continue
+                    elif not extracted.line_items:
+                        failed_bills.append({
+                            "kind": "PURCHASE",
+                            "filename": file.filename,
+                            "invoice_number": extracted.invoice_number,
+                            "date": extracted.date,
+                            "reason": "no_line_items: " + ("; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                        })
 
+                    # Production behavior: include bill even if line_items is empty (for output visibility).
                     purchase_data.append({
                         'invoice_number': extracted.invoice_number,
                         'date': extracted.date,
@@ -195,17 +235,24 @@ async def analyze_bills(
                         'total': extracted.total
                     })
                 else:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Error reading file '{file.filename}': {parse_result.error_message}. Please upload a valid PDF or Excel."
-                    )
-            except HTTPException:
-                raise
+                    # Soft failure: record and continue (never fail the entire request)
+                    failed_bills.append({
+                        "kind": "PURCHASE",
+                        "filename": file.filename,
+                        "invoice_number": "",
+                        "date": "",
+                        "reason": f"file_parse_error: {parse_result.error_message}",
+                    })
+                    continue
             except Exception as e:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Error processing file '{file.filename}': {str(e)}"
-                )
+                failed_bills.append({
+                    "kind": "PURCHASE",
+                    "filename": file.filename,
+                    "invoice_number": "",
+                    "date": "",
+                    "reason": f"file_parse_error: {str(e)}",
+                })
+                continue
         
         # Process sales files
         for file in sales_files:
@@ -219,21 +266,48 @@ async def analyze_bills(
                 print(f"Processing Sales File: {file.filename}")
                 
                 if parse_result.success:
-                    extracted = ai_extractor.extract(
-                        parse_result.text_content,
-                        parse_result.tables
-                    )
+                    async with LLM_LOCK:
+                        await asyncio.sleep(random.uniform(1.0, 2.0))
+                        extracted = await run_in_threadpool(
+                            ai_extractor.extract,
+                            parse_result.text_content,
+                            parse_result.tables,
+                        )
 
-                    if not extracted.line_items:
+                    err_code = getattr(extracted, "error_code", "") or ""
+                    if err_code == "rate_limit_error":
+                        if extracted.line_items:
+                            failed_bills.append({
+                                "kind": "SALES",
+                                "filename": file.filename,
+                                "invoice_number": extracted.invoice_number,
+                                "date": extracted.date,
+                                "reason": "rate_limit_error (used fallback extraction)"
+                            })
+                        else:
+                            skipped_rate_limit.append({
+                                "kind": "SALES",
+                                "filename": file.filename,
+                                "invoice_number": extracted.invoice_number,
+                                "date": extracted.date,
+                                "reason": "skipped_due_to_rate_limit"
+                            })
+                    elif err_code:
                         failed_bills.append({
                             "kind": "SALES",
                             "filename": file.filename,
                             "invoice_number": extracted.invoice_number,
                             "date": extracted.date,
-                            "reason": "No line items extracted. Bill excluded from inventory aggregation."
-                                      + (" Notes: " + "; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                            "reason": f"{err_code}: " + ("; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
                         })
-                        continue
+                    elif not extracted.line_items:
+                        failed_bills.append({
+                            "kind": "SALES",
+                            "filename": file.filename,
+                            "invoice_number": extracted.invoice_number,
+                            "date": extracted.date,
+                            "reason": "no_line_items: " + ("; ".join(extracted.extraction_notes) if extracted.extraction_notes else "")
+                        })
                     
                     # IMPORTANT:
                     # The UI already separates Purchase vs Sales uploads.
@@ -253,34 +327,51 @@ async def analyze_bills(
                         'total': extracted.total
                     })
                 else:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Error reading file '{file.filename}': {parse_result.error_message}. Please upload a valid PDF or Excel."
-                    )
-            except HTTPException:
-                raise
+                    failed_bills.append({
+                        "kind": "SALES",
+                        "filename": file.filename,
+                        "invoice_number": "",
+                        "date": "",
+                        "reason": f"file_parse_error: {parse_result.error_message}",
+                    })
+                    continue
             except Exception as e:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Error processing file '{file.filename}': {str(e)}"
-                )
+                failed_bills.append({
+                    "kind": "SALES",
+                    "filename": file.filename,
+                    "invoice_number": "",
+                    "date": "",
+                    "reason": f"file_parse_error: {str(e)}",
+                })
+                continue
         
-        # Check if we have any data
-        if not purchase_data and not sales_data:
-            raise HTTPException(
-                status_code=400,
-                detail="No valid bills were found (all extractions had zero line items). Please check PDF quality or upload a different copy."
-            )
+        # Partial success support: only fail if nothing was uploaded.
+        if total_bills == 0:
+            raise HTTPException(status_code=400, detail="No bills uploaded.")
         
         # Perform inventory analysis
         analysis = inventory_analyzer.analyze(purchase_data, sales_data)
         
+        bills_all = purchase_data + sales_data
+        successful = len([b for b in bills_all if b.get("line_items")])
+        partial = len([b for b in bills_all if (not b.get("line_items")) and (b.get("invoice_number") or b.get("vendor_name") or b.get("total"))])
+        failed = len(failed_bills)
+        skipped = len(skipped_rate_limit)
+        summary = {
+            "total_bills": total_bills,
+            "successful": successful,
+            "partial": partial,
+            "failed": failed,
+            "skipped_due_to_rate_limit": skipped,
+        }
+
         # Generate Excel report
         excel_bytes = excel_generator.generate_analysis_report(
             analysis,
             purchase_data,
             sales_data,
-            failed_bills=failed_bills
+            failed_bills=(failed_bills + skipped_rate_limit),
+            run_summary=summary,
         )
         
         # Generate filename
@@ -292,7 +383,8 @@ async def analyze_bills(
             "Content-Disposition": f'attachment; filename="{output_filename}"',
             "Content-Length": str(len(excel_bytes)),
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache"
+            "Pragma": "no-cache",
+            "X-Processing-Summary": _json.dumps(summary),
         }
         
         # Return streaming response

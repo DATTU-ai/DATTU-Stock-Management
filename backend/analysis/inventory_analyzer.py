@@ -368,11 +368,32 @@ class InventoryAnalyzer:
         """
         Normalize item name for matching.
         
-        Converts to lowercase, removes extra whitespace.
+        Converts to lowercase, removes extra whitespace, strips size tokens,
+        and standardizes common code variants so purchase/sales match better.
         """
         if not name:
             return "Unknown Item"
-        return ' '.join(name.lower().strip().split())
+        import re
+
+        s = ' '.join(name.lower().strip().split())
+
+        # Remove common size tokens like 9.5", 11.5", 12", 9.5 inch
+        s = re.sub(r"\b\d+(?:\.\d+)?\s*(?:\"|inches|inch|in)\b", "", s)
+        s = re.sub(r"\b\d+(?:\.\d+)?\s*'\s*\b", "", s)
+        s = re.sub(r"\s+", " ", s).strip()
+
+        # Standardize "at <digits> <letter>" -> "atf <digits> <letter>"
+        # (helps merge AT vs ATF codes across different invoice templates)
+        tokens = s.split()
+        if len(tokens) >= 3 and tokens[0] == "at" and tokens[1].isdigit() and len(tokens[2]) <= 2:
+            tokens[0] = "atf"
+            s = " ".join(tokens)
+
+        # Remove stray punctuation around codes
+        s = re.sub(r"[^\w\s/.-]+", "", s).strip()
+        s = re.sub(r"\s+", " ", s).strip()
+
+        return s
     
     def _generate_insights(self, analysis: InventoryAnalysis) -> List[str]:
         """

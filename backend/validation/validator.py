@@ -83,7 +83,8 @@ class Validator:
             result.add_warning("Vendor/Supplier name could not be identified")
         
         if not data.line_items:
-            result.add_error("No line items could be extracted")
+            # Production behavior: do not reject entire bill if items are missing.
+            result.add_warning("No line items detected")
     
     def _validate_line_items(self, data: ExtractedData, result: ValidationResult):
         """

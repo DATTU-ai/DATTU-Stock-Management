@@ -322,7 +322,8 @@ class ExcelGenerator:
         analysis,  # InventoryAnalysis object
         purchase_bills: List[dict],
         sales_bills: List[dict],
-        failed_bills: Optional[List[dict]] = None
+        failed_bills: Optional[List[dict]] = None,
+        run_summary: Optional[dict] = None
     ) -> bytes:
         """
         Generate comprehensive analysis Excel from purchase and sales data.
@@ -344,6 +345,8 @@ class ExcelGenerator:
         wb = Workbook()
         
         # Create sheets
+        if run_summary:
+            self._create_run_summary_sheet(wb, run_summary)
         self._create_inventory_summary_sheet(wb, analysis)
         self._create_bills_sheet(wb, purchase_bills, "Purchase Bills", "PURCHASE")
         self._create_bills_sheet(wb, sales_bills, "Sales Bills", "SALES")
@@ -364,6 +367,37 @@ class ExcelGenerator:
         finally:
             buffer.close()
             wb.close()
+
+    def _create_run_summary_sheet(self, wb: Workbook, summary: dict):
+        ws = wb.create_sheet("Run Summary", 0)
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["C"].width = 70
+
+        headers = ["Metric", "Value", "Notes"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=header)
+            cell.fill = self.HEADER_FILL
+            cell.font = self.HEADER_FONT
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = self.BORDER
+
+        rows = [
+            ("Total bills uploaded", summary.get("total_bills", 0), ""),
+            ("Successful", summary.get("successful", 0), "Bills with extracted line items"),
+            ("Partial", summary.get("partial", 0), "Bills included but missing line items"),
+            ("Failed", summary.get("failed", 0), "Parsing/LLM errors recorded in 'Failed Bills'"),
+            ("Skipped due to rate limit", summary.get("skipped_due_to_rate_limit", 0), ""),
+            ("Notes", "", "This report is best-effort. Bills with extraction errors are listed in 'Failed Bills'."),
+        ]
+
+        r = 2
+        for metric, value, notes in rows:
+            ws.cell(row=r, column=1, value=metric).border = self.BORDER
+            ws.cell(row=r, column=2, value=value).border = self.BORDER
+            ws.cell(row=r, column=3, value=notes).border = self.BORDER
+            ws.cell(row=r, column=3).alignment = Alignment(wrap_text=True)
+            r += 1
 
     def _create_failed_bills_sheet(self, wb: Workbook, failed_bills: List[dict]):
         """
@@ -644,6 +678,17 @@ class ExcelGenerator:
             first_item = True
             
             # 1. Render Line Items (Products)
+            if not line_items:
+                # Still include the bill row in output (production-grade partial success)
+                ws.cell(row=row_num, column=1, value=bill_number).border = self.BORDER
+                ws.cell(row=row_num, column=2, value=date).border = self.BORDER
+                ws.cell(row=row_num, column=3, value=party).border = self.BORDER
+                ws.cell(row=row_num, column=4, value="No line items detected").border = self.BORDER
+                for col in range(5, 13):
+                    ws.cell(row=row_num, column=col).border = self.BORDER
+                row_num += 1
+                continue
+
             for item in line_items:
                 bill_num_cell = ws.cell(row=row_num, column=1, value=bill_number if first_item else "")
                 bill_num_cell.border = self.BORDER
