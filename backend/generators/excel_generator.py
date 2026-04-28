@@ -627,20 +627,20 @@ class ExcelGenerator:
         # Column widths
         ws.column_dimensions['A'].width = 16  # Bill Number
         ws.column_dimensions['B'].width = 11  # Date
-        ws.column_dimensions['C'].width = 22  # Vendor/Customer
-        ws.column_dimensions['D'].width = 35  # Item Name
-        ws.column_dimensions['E'].width = 8   # Qty
-        ws.column_dimensions['F'].width = 12  # Rate
-        ws.column_dimensions['G'].width = 10  # Disc. %
-        ws.column_dimensions['H'].width = 14  # Amount
-        ws.column_dimensions['I'].width = 12  # CGST
-        ws.column_dimensions['J'].width = 12  # SGST
-        ws.column_dimensions['K'].width = 12  # IGST
-        ws.column_dimensions['L'].width = 14  # Total
+        ws.column_dimensions['C'].width = 22  # Vendor
+        ws.column_dimensions['D'].width = 28  # Customer
+        ws.column_dimensions['E'].width = 35  # Item Name
+        ws.column_dimensions['F'].width = 8   # Qty
+        ws.column_dimensions['G'].width = 12  # Rate
+        ws.column_dimensions['H'].width = 10  # Disc. %
+        ws.column_dimensions['I'].width = 14  # Amount
+        ws.column_dimensions['J'].width = 12  # CGST
+        ws.column_dimensions['K'].width = 12  # SGST
+        ws.column_dimensions['L'].width = 12  # IGST
+        ws.column_dimensions['M'].width = 14  # Total
         
         # Header
-        party_type = "Vendor" if bill_type == "PURCHASE" else "Customer"
-        headers = ["Bill Number", "Date", party_type, "Item Name", "Qty", "Rate", "Disc. %", "Amount", "CGST", "SGST", "IGST", "Bill Total"]
+        headers = ["Bill Number", "Date", "Vendor", "Customer", "Item Name", "Qty", "Rate", "Disc. %", "Amount", "CGST", "SGST", "IGST", "Bill Total"]
         
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col, value=header)
@@ -660,10 +660,8 @@ class ExcelGenerator:
         for bill in bills:
             bill_number = bill.get('invoice_number', 'Unknown')
             date = bill.get('date', '')
-            if bill_type == "SALES":
-                party = bill.get('customer_name', '') or ''
-            else:
-                party = bill.get('vendor_name', '') or ''
+            vendor = bill.get('vendor_name', '') or ''
+            customer = bill.get('customer_name', '') or ''
             line_items = bill.get('line_items', [])
             bill_cgst = bill.get('cgst', 0)
             bill_sgst = bill.get('sgst', 0)
@@ -682,9 +680,10 @@ class ExcelGenerator:
                 # Still include the bill row in output (production-grade partial success)
                 ws.cell(row=row_num, column=1, value=bill_number).border = self.BORDER
                 ws.cell(row=row_num, column=2, value=date).border = self.BORDER
-                ws.cell(row=row_num, column=3, value=party).border = self.BORDER
-                ws.cell(row=row_num, column=4, value="No line items detected").border = self.BORDER
-                for col in range(5, 13):
+                ws.cell(row=row_num, column=3, value=vendor).border = self.BORDER
+                ws.cell(row=row_num, column=4, value=customer).border = self.BORDER
+                ws.cell(row=row_num, column=5, value="No line items detected").border = self.BORDER
+                for col in range(6, 14):
                     ws.cell(row=row_num, column=col).border = self.BORDER
                 row_num += 1
                 continue
@@ -694,24 +693,25 @@ class ExcelGenerator:
                 bill_num_cell.border = self.BORDER
                 bill_num_cell.number_format = '@'  # Force text format
                 ws.cell(row=row_num, column=2, value=date if first_item else "").border = self.BORDER
-                ws.cell(row=row_num, column=3, value=party if first_item else "").border = self.BORDER
-                ws.cell(row=row_num, column=4, value=item.item_name).border = self.BORDER
+                ws.cell(row=row_num, column=3, value=vendor if first_item else "").border = self.BORDER
+                ws.cell(row=row_num, column=4, value=customer if first_item else "").border = self.BORDER
+                ws.cell(row=row_num, column=5, value=item.item_name).border = self.BORDER
                 
-                qty_cell = ws.cell(row=row_num, column=5, value=item.quantity)
+                qty_cell = ws.cell(row=row_num, column=6, value=item.quantity)
                 qty_cell.alignment = Alignment(horizontal='center')
                 qty_cell.border = self.BORDER
                 
-                rate_cell = ws.cell(row=row_num, column=6, value=item.rate if item.rate > 0 else "")
+                rate_cell = ws.cell(row=row_num, column=7, value=item.rate if item.rate > 0 else "")
                 rate_cell.alignment = Alignment(horizontal='right')
                 rate_cell.border = self.BORDER
                 rate_cell.number_format = '#,##0.00'
                 
                 # Discount percentage column
-                disc_cell = ws.cell(row=row_num, column=7, value=f"{int(item.discount_percent)}%" if item.discount_percent > 0 else "")
+                disc_cell = ws.cell(row=row_num, column=8, value=f"{int(item.discount_percent)}%" if item.discount_percent > 0 else "")
                 disc_cell.alignment = Alignment(horizontal='center')
                 disc_cell.border = self.BORDER
                 
-                amount_cell = ws.cell(row=row_num, column=8, value=item.amount if item.amount > 0 else "")
+                amount_cell = ws.cell(row=row_num, column=9, value=item.amount if item.amount > 0 else "")
                 amount_cell.alignment = Alignment(horizontal='right')
                 amount_cell.border = self.BORDER
                 amount_cell.number_format = '#,##0.00'
@@ -721,33 +721,33 @@ class ExcelGenerator:
                 
                 # Show GST and total only on first row of each bill
                 if first_item:
-                    cgst_cell = ws.cell(row=row_num, column=9, value=bill_cgst if bill_cgst > 0 else "")
+                    cgst_cell = ws.cell(row=row_num, column=10, value=bill_cgst if bill_cgst > 0 else "")
                     cgst_cell.alignment = Alignment(horizontal='right')
                     cgst_cell.border = self.BORDER
                     cgst_cell.number_format = '#,##0.00'
                     
-                    sgst_cell = ws.cell(row=row_num, column=10, value=bill_sgst if bill_sgst > 0 else "")
+                    sgst_cell = ws.cell(row=row_num, column=11, value=bill_sgst if bill_sgst > 0 else "")
                     sgst_cell.alignment = Alignment(horizontal='right')
                     sgst_cell.border = self.BORDER
                     sgst_cell.number_format = '#,##0.00'
 
                     # IGST
                     bill_igst = bill.get('igst', 0)
-                    igst_cell = ws.cell(row=row_num, column=11, value=bill_igst if bill_igst > 0 else "")
+                    igst_cell = ws.cell(row=row_num, column=12, value=bill_igst if bill_igst > 0 else "")
                     igst_cell.alignment = Alignment(horizontal='right')
                     igst_cell.border = self.BORDER
                     igst_cell.number_format = '#,##0.00'
                     
-                    total_cell = ws.cell(row=row_num, column=12, value=bill_total if bill_total > 0 else "")
+                    total_cell = ws.cell(row=row_num, column=13, value=bill_total if bill_total > 0 else "")
                     total_cell.alignment = Alignment(horizontal='right')
                     total_cell.border = self.BORDER
                     total_cell.number_format = '#,##0.00'
                     total_cell.font = Font(bold=True)
                 else:
-                    ws.cell(row=row_num, column=9).border = self.BORDER
                     ws.cell(row=row_num, column=10).border = self.BORDER
                     ws.cell(row=row_num, column=11).border = self.BORDER
                     ws.cell(row=row_num, column=12).border = self.BORDER
+                    ws.cell(row=row_num, column=13).border = self.BORDER
                 
                 first_item = False
                 row_num += 1
@@ -757,7 +757,8 @@ class ExcelGenerator:
             for charge in charges:
                 ws.cell(row=row_num, column=1, value=bill_number if first_item else "").border = self.BORDER
                 ws.cell(row=row_num, column=2, value=date if first_item else "").border = self.BORDER
-                ws.cell(row=row_num, column=3, value=party if first_item else "").border = self.BORDER
+                ws.cell(row=row_num, column=3, value=vendor if first_item else "").border = self.BORDER
+                ws.cell(row=row_num, column=4, value=customer if first_item else "").border = self.BORDER
                 
                 # Show charge name with prefix, unless it's a discount
                 if "discount" in charge.charge_name.lower() or "less" in charge.charge_name.lower():
@@ -765,7 +766,7 @@ class ExcelGenerator:
                 else:
                      charge_display_name = f"Additional Charge: {charge.charge_name}"
                 
-                charge_name_cell = ws.cell(row=row_num, column=4, value=charge_display_name)
+                charge_name_cell = ws.cell(row=row_num, column=5, value=charge_display_name)
                 charge_name_cell.border = self.BORDER
                 charge_name_cell.font = Font(italic=True, color="555555")
                 
@@ -774,24 +775,24 @@ class ExcelGenerator:
                 charge_rate = getattr(charge, 'rate', 0)
                 
                 if charge_qty > 0 and (charge_qty != 1 or charge_rate > 0):
-                    qty_cell = ws.cell(row=row_num, column=5, value=charge_qty)
+                    qty_cell = ws.cell(row=row_num, column=6, value=charge_qty)
                     qty_cell.alignment = Alignment(horizontal='center')
                     qty_cell.border = self.BORDER
                 else:
-                    ws.cell(row=row_num, column=5).border = self.BORDER
+                    ws.cell(row=row_num, column=6).border = self.BORDER
                 
                 if charge_rate > 0:
-                    rate_cell = ws.cell(row=row_num, column=6, value=charge_rate)
+                    rate_cell = ws.cell(row=row_num, column=7, value=charge_rate)
                     rate_cell.alignment = Alignment(horizontal='right')
                     rate_cell.border = self.BORDER
                     rate_cell.number_format = '#,##0.00'
                 else:
-                    ws.cell(row=row_num, column=6).border = self.BORDER
+                    ws.cell(row=row_num, column=7).border = self.BORDER
 
-                ws.cell(row=row_num, column=7).border = self.BORDER
+                ws.cell(row=row_num, column=8).border = self.BORDER
                 
                 # Charge amount
-                amount_cell = ws.cell(row=row_num, column=8, value=charge.amount)
+                amount_cell = ws.cell(row=row_num, column=9, value=charge.amount)
                 amount_cell.alignment = Alignment(horizontal='right')
                 amount_cell.border = self.BORDER
                 amount_cell.number_format = '#,##0.00'
@@ -801,32 +802,33 @@ class ExcelGenerator:
                 
                 # Show GST/Total on first row if this is the ONLY item (no line items)
                 if first_item:
-                    cgst_cell = ws.cell(row=row_num, column=9, value=bill_cgst if bill_cgst > 0 else "")
+                    cgst_cell = ws.cell(row=row_num, column=10, value=bill_cgst if bill_cgst > 0 else "")
                     cgst_cell.alignment = Alignment(horizontal='right')
                     cgst_cell.border = self.BORDER
                     cgst_cell.number_format = '#,##0.00'
                     
-                    sgst_cell = ws.cell(row=row_num, column=10, value=bill_sgst if bill_sgst > 0 else "")
+                    sgst_cell = ws.cell(row=row_num, column=11, value=bill_sgst if bill_sgst > 0 else "")
                     sgst_cell.alignment = Alignment(horizontal='right')
                     sgst_cell.border = self.BORDER
                     sgst_cell.number_format = '#,##0.00'
 
                     # IGST
                     bill_igst = bill.get('igst', 0)
-                    igst_cell = ws.cell(row=row_num, column=11, value=bill_igst if bill_igst > 0 else "")
+                    igst_cell = ws.cell(row=row_num, column=12, value=bill_igst if bill_igst > 0 else "")
                     igst_cell.alignment = Alignment(horizontal='right')
                     igst_cell.border = self.BORDER
                     igst_cell.number_format = '#,##0.00'
                     
-                    total_cell = ws.cell(row=row_num, column=12, value=bill_total if bill_total > 0 else "")
+                    total_cell = ws.cell(row=row_num, column=13, value=bill_total if bill_total > 0 else "")
                     total_cell.alignment = Alignment(horizontal='right')
                     total_cell.border = self.BORDER
                     total_cell.number_format = '#,##0.00'
                     total_cell.font = Font(bold=True)
                 else:
-                    ws.cell(row=row_num, column=9).border = self.BORDER
                     ws.cell(row=row_num, column=10).border = self.BORDER
                     ws.cell(row=row_num, column=11).border = self.BORDER
+                    ws.cell(row=row_num, column=12).border = self.BORDER
+                    ws.cell(row=row_num, column=13).border = self.BORDER
                 
                 first_item = False
                 row_num += 1
@@ -836,19 +838,20 @@ class ExcelGenerator:
             if first_item:
                 ws.cell(row=row_num, column=1, value=bill_number).border = self.BORDER
                 ws.cell(row=row_num, column=2, value=date).border = self.BORDER
-                ws.cell(row=row_num, column=3, value=party).border = self.BORDER
+                ws.cell(row=row_num, column=3, value=vendor).border = self.BORDER
+                ws.cell(row=row_num, column=4, value=customer).border = self.BORDER
                 
-                status_cell = ws.cell(row=row_num, column=4, value="[No Items Extracted]")
+                status_cell = ws.cell(row=row_num, column=5, value="[No Items Extracted]")
                 status_cell.font = Font(italic=True, color="FF0000")
                 status_cell.border = self.BORDER
                 
                 # Empty cells
-                for col in range(5, 13):
+                for col in range(6, 14):
                     ws.cell(row=row_num, column=col).border = self.BORDER
                 
                 # Can show total if it exists
                 if bill_total > 0:
-                     ws.cell(row=row_num, column=12, value=bill_total).border = self.BORDER
+                     ws.cell(row=row_num, column=13, value=bill_total).border = self.BORDER
                 
                 row_num += 1
         
@@ -856,21 +859,21 @@ class ExcelGenerator:
         if grand_total_bill > 0:
             row_num += 1  # Empty row
             
-            for col in range(1, 8):
+            for col in range(1, 9):
                 ws.cell(row=row_num, column=col).border = self.BORDER
             
-            total_label = ws.cell(row=row_num, column=8, value="GRAND TOTAL:")
+            total_label = ws.cell(row=row_num, column=9, value="GRAND TOTAL:")
             total_label.font = Font(bold=True)
             total_label.border = self.BORDER
             
-            cgst_total = ws.cell(row=row_num, column=9, value=grand_total_cgst)
+            cgst_total = ws.cell(row=row_num, column=10, value=grand_total_cgst)
             cgst_total.number_format = '#,##0.00'
             cgst_total.font = Font(bold=True)
             cgst_total.alignment = Alignment(horizontal='right')
             cgst_total.fill = self.SUCCESS_FILL
             cgst_total.border = self.BORDER
             
-            sgst_total = ws.cell(row=row_num, column=10, value=grand_total_sgst)
+            sgst_total = ws.cell(row=row_num, column=11, value=grand_total_sgst)
             sgst_total.number_format = '#,##0.00'
             sgst_total.font = Font(bold=True)
             sgst_total.alignment = Alignment(horizontal='right')
@@ -878,14 +881,14 @@ class ExcelGenerator:
             sgst_total.border = self.BORDER
             sgst_total.number_format = '#,##0.00'
             
-            igst_total = ws.cell(row=row_num, column=11, value=grand_total_igst)
+            igst_total = ws.cell(row=row_num, column=12, value=grand_total_igst)
             igst_total.number_format = '#,##0.00'
             igst_total.font = Font(bold=True)
             igst_total.alignment = Alignment(horizontal='right')
             igst_total.fill = self.SUCCESS_FILL
             igst_total.border = self.BORDER
             
-            bill_grand_total = ws.cell(row=row_num, column=12, value=grand_total_bill)
+            bill_grand_total = ws.cell(row=row_num, column=13, value=grand_total_bill)
             bill_grand_total.font = Font(bold=True)
             bill_grand_total.alignment = Alignment(horizontal='right')
             bill_grand_total.fill = self.SUCCESS_FILL
@@ -895,7 +898,7 @@ class ExcelGenerator:
         # If no data
         if row_num == 2:
             ws.cell(row=2, column=1, value=f"No {sheet_name.lower()} data")
-            ws.merge_cells('A2:L2')
+            ws.merge_cells('A2:M2')
     
     def _create_insights_sheet(self, wb: Workbook, analysis):
         """
